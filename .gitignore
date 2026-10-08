@@ -1,0 +1,19 @@
+# build output
+/matmul
+*.o
+*.ptx
+*.sass
+
+# Nsight Compute reports are large; commit only the ones you want to keep
+*.ncu-rep
+
+# notebooks / editors
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+notebooks/run.ipynb
+
+# manim venv + render cache (keep naive_kernel.py and the exported .mp4)
+animation/.venv/
+animation/media/
+animation/
