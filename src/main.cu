@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include "kernels/01_naive.cuh" 
+#include "kernels/02_gmem_coalescing.cuh"
 
 #define CUDA_CHECK(call)                                               \
   do {                                                                 \
@@ -40,6 +41,16 @@ float timeMS(F launch, int runs) {
 
 }
 
+bool matches (const float* got, const float* ref, size_t count) { 
+    for (size_t i = 0; i < count; i++) { 
+        if (fabsf(got[i] - ref[i]) > 1e-3f * fmaxf(1.0f, fabsf(ref[i]))) { 
+            return false; 
+        }
+    }
+    return true; 
+}
+
+
 int main() { 
     cublasHandle_t handle;
     cublasCreate(&handle);
@@ -48,7 +59,8 @@ int main() {
     const float beta = 0.0f;
 
     int sizes[] = { 512, 1024, 2048, 4096, 8192 };
-    printf("%6s %10s %10s %10s %8s %s\n", "N", "ms", "GFLOPS", "cuBLAS", "%", "correct");
+    printf("%6s %10s %10s %10s %8s %8s %6s %6s\n",
+       "N", "naive", "coalesced", "cuBLAS", "naive%", "coal%", "ok_n", "ok_c");
 
     /*i didnt know before but its good to have the sweep cuz how it shows how the kernel compares to cuBLAS across sizes,
      since small sizes mostly measure launch overhead and large ones measure real compute, so one size alone mislead . 
@@ -61,6 +73,7 @@ int main() {
 
         float *h_A = (float*)malloc(bytes), *h_B = (float*)malloc(bytes); 
         float *h_C = (float*)malloc(bytes), *h_ref = (float*)malloc(bytes); // h_ref is the cUBLAS reference result
+        float *h_naive = (float*)malloc(bytes); // h_naive is the naive kernel result
 
         for (size_t i = 0; i < count; i++) { 
             h_A[i] = rand() / float(RAND_MAX);
@@ -68,7 +81,7 @@ int main() {
         }
 
 
-        float *d_A, *d_B, *d_C, *d_ref; 
+        float *d_A, *d_B, *d_C, *d_ref, *d_naive; 
         CUDA_CHECK(cudaMalloc(&d_A, bytes));
         CUDA_CHECK(cudaMalloc(&d_B, bytes));
         CUDA_CHECK(cudaMalloc(&d_C, bytes));
@@ -77,12 +90,20 @@ int main() {
         CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
 
-        dim3 block(32,32); 
+
+        CUDA_CHECK(cudaMalloc(&d_naive, bytes));
+        CUDA_CHECK(cudaMemset(d_naive, 0, bytes));
+
+        dim3 block(32,32);  
         dim3 grid((N+31)/ 32, (N+31)/32); 
 
-        auto mine = [&] () { 
-            matmul_naive<<<grid, block>>>(N, N, N, alpha, d_A, d_B, beta, d_C);
+        auto newest = [&] () { 
+            matmul_coalesced<<<grid, block>>>(N, N, N, alpha, d_A, d_B, beta, d_C);
         }; 
+
+        auto naive = [&] () { 
+            matmul_naive<<<grid, block>>>(N, N, N, alpha, d_A, d_B, beta, d_naive);
+        };
 
         auto ref = [&] () { 
             cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N,
@@ -90,31 +111,31 @@ int main() {
         };
 
         int runs = (N >= 2048) ? 3 : 10; 
-        float msMine = timeMS(mine, runs); 
+        float msNewest = timeMS(newest, runs); 
+        float msNaive = timeMS(naive, runs);
         float msRef = timeMS(ref, runs); 
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_ref, d_ref, bytes, cudaMemcpyDeviceToHost));
-        bool ok = true;
-
-
-        for (size_t i = 0; i < count; i++) { 
-           if (fabsf(h_C[i] - h_ref[i]) > 1e-3f * fmaxf(1.0f, fabsf(h_ref[i]))) { 
-               ok = false; 
-               break; 
-           }
-        }
+        CUDA_CHECK(cudaMemcpy(h_naive, d_naive, bytes, cudaMemcpyDeviceToHost));
+        
+        bool okNaive = matches(h_naive, h_ref, count);
+        bool okNewest = matches(h_C, h_ref, count);
 
         double flops = 2.0 * N * N * N; 
-        double gMine = flops / (msMine * 1e6);
+        double gNewest = flops / (msNewest * 1e6);
         double gRef = flops / (msRef * 1e6);
+        double gNaive = flops / (msNaive * 1e6);
 
-        printf("%6d %10.3f %10.1f %10.1f %7.1f%% %s\n", N, msMine, gMine, gRef,
-           100.0 * gMine / gRef, ok ? "YES" : "NO");
+        printf("%6d %10.1f %10.1f %10.1f %7.1f%% %7.1f%% %6s %6s\n",
+            N, gNaive, gNewest, gRef,
+            100.0 * gNaive / gRef, 100.0 * gNewest / gRef,
+            okNaive ? "YES" : "NO", okNewest ? "YES" : "NO");
 
         cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); cudaFree(d_ref);
         free(h_A); free(h_B); free(h_C); free(h_ref);
+        cudaFree(d_naive); free(h_naive);
 
 
     }
