@@ -6,6 +6,7 @@
 #include "kernels/01_naive.cuh" 
 #include "kernels/02_gmem_coalescing.cuh"
 #include "kernels/03_smem_blocking.cuh"
+#include "kernels/04_1d_blocktiling.cuh"
 
 #define CUDA_CHECK(call)                                               \
   do {                                                                 \
@@ -60,8 +61,10 @@ int main() {
     const float beta = 0.0f;
 
     int sizes[] = { 512, 1024, 2048, 4096, 8192 };
-    printf("%6s %9s %9s %9s %9s %7s %7s %5s %5s %5s\n",
-       "N", "naive", "coalesced", "smem", "cuBLAS", "coal%", "smem%", "ok_n", "ok_c", "ok_s");
+    printf("%6s %9s %9s %9s %9s %9s %7s %7s %7s %7s %5s %5s %5s %5s\n",
+        "N", "naive", "coalesced", "smem", "1D", "cuBLAS",
+        "naive%", "coal%", "smem%", "1D%",
+        "ok_n", "ok_c", "ok_s", "ok_1");
 
     /*i didnt know before but its good to have the sweep cuz how it shows how the kernel compares to cuBLAS across sizes,
      since small sizes mostly measure launch overhead and large ones measure real compute, so one size alone mislead . 
@@ -78,6 +81,7 @@ int main() {
         float *h_naive = (float*)malloc(bytes); 
         float *h_Coal = (float*)malloc(bytes); 
         float *h_smem = (float*)malloc(bytes); 
+        float *h_1D = (float*)malloc(bytes);
 
         for (size_t i = 0; i < count; i++) { 
             h_A[i] = rand() / float(RAND_MAX);
@@ -85,13 +89,14 @@ int main() {
         }
 
 
-        float *d_A, *d_B, *d_Coal, *d_ref, *d_naive, *d_smem; 
+        float *d_A, *d_B, *d_Coal, *d_ref, *d_naive, *d_smem, *d_1D;
         CUDA_CHECK(cudaMalloc(&d_A, bytes));
         CUDA_CHECK(cudaMalloc(&d_B, bytes));
-        CUDA_CHECK(cudaMalloc(&d_Coal, bytes));
         CUDA_CHECK(cudaMalloc(&d_ref, bytes));
+        CUDA_CHECK(cudaMalloc(&d_Coal, bytes));
         CUDA_CHECK(cudaMalloc(&d_naive, bytes));
         CUDA_CHECK(cudaMalloc(&d_smem, bytes));
+        CUDA_CHECK(cudaMalloc(&d_1D, bytes));
 
         CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
@@ -99,9 +104,14 @@ int main() {
         CUDA_CHECK(cudaMemset(d_Coal, 0, bytes));
         CUDA_CHECK(cudaMemset(d_smem, 0, bytes));
         CUDA_CHECK(cudaMemset(d_naive, 0, bytes));
+        CUDA_CHECK(cudaMemset(d_1D, 0, bytes));
 
         dim3 block(32,32);  
         dim3 grid((N+31)/ 32, (N+31)/32); 
+
+        constexpr int BM = 64, BN = 64, BK = 8, TM = 8;
+        dim3 block1D((BM * BN)/ TM);
+        dim3 grid1D((N+BN-1)/BN, (N+BM-1)/BM);
 
         auto coal = [&] () { 
             matmul_coalesced<<<grid, block>>>(N, N, N, alpha, d_A, d_B, beta, d_Coal);
@@ -120,11 +130,16 @@ int main() {
             &alpha, d_B, N, d_A, N, &beta, d_ref, N);
         };
 
+        auto oneD = [&] () { 
+            matmul_1D<BM, BN, BK, TM><<<grid1D, block1D>>>(N, N, N, alpha, d_A, d_B, beta, d_1D);
+        };
+
         int runs = (N >= 2048) ? 3 : 10; 
         
         float msNaive = timeMS(naive, runs);
         float msCoalesced = timeMS(coal, runs);     
         float msSmem = timeMS(smem, runs);
+        float ms1D = timeMS(oneD, runs);
 
         float msRef = timeMS(ref, runs); 
         CUDA_CHECK(cudaGetLastError());
@@ -133,28 +148,32 @@ int main() {
         CUDA_CHECK(cudaMemcpy(h_Coal, d_Coal, bytes, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_smem, d_smem, bytes, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_ref, d_ref, bytes, cudaMemcpyDeviceToHost));
-        
+        CUDA_CHECK(cudaMemcpy(h_1D, d_1D, bytes, cudaMemcpyDeviceToHost));
         
         bool okNaive = matches(h_naive, h_ref, count);
         bool okCoalesced = matches(h_Coal, h_ref, count);
         bool okSmem = matches(h_smem, h_ref, count);
+        bool ok1D = matches(h_1D, h_ref, count);
 
         double flops = 2.0 * N * N * N; 
         double gRef = flops / (msRef * 1e6);
         double gNaive = flops / (msNaive * 1e6);
         double gCoalesced = flops / (msCoalesced * 1e6);
         double gSmem = flops / (msSmem * 1e6);
+        double g1D = flops / (ms1D * 1e6);
 
-        printf("%6d %9.1f %9.1f %9.1f %9.1f %6.1f%% %6.1f%% %5s %5s %5s\n",
-       N, gNaive, gCoalesced, gSmem, gRef,
-       100.0 * gCoalesced / gRef, 100.0 * gSmem / gRef,
-       okNaive ? "YES" : "NO", okCoalesced ? "YES" : "NO", okSmem ? "YES" : "NO");
+        printf("%6d %9.1f %9.1f %9.1f %9.1f %9.1f %6.1f%% %6.1f%% %6.1f%% %6.1f%% %5s %5s %5s %5s\n",
+            N, gNaive, gCoalesced, gSmem, g1D, gRef,
+            100.0 * gNaive / gRef, 100.0 * gCoalesced / gRef,
+            100.0 * gSmem / gRef, 100.0 * g1D / gRef,
+            okNaive ? "YES" : "NO", okCoalesced ? "YES" : "NO",
+            okSmem ? "YES" : "NO", ok1D ? "YES" : "NO");
 
         cudaFree(d_A); cudaFree(d_B); cudaFree(d_Coal); cudaFree(d_ref);
         free(h_A); free(h_B); free(h_Coal); free(h_ref);
         cudaFree(d_naive); free(h_naive);
         cudaFree(d_smem); free(h_smem);
-
+        cudaFree(d_1D); free(h_1D);
 
     }
 
