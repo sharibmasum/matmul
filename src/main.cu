@@ -10,6 +10,7 @@
 #include "kernels/04_1d_blocktiling.cuh"
 #include "kernels/05_2d_blocktiling.cuh"
 #include "kernels/06_vectorize.cuh"
+#include "kernels/08_warptilling.cuh"
 
 int main()
 {
@@ -20,10 +21,10 @@ int main()
     const float beta = 0.0f;
 
     int sizes[] = {512, 1024, 2048, 4096, 8192};
-    printf("%6s %9s %9s %9s %9s %9s %9s %9s %7s %7s %7s %7s %7s %7s %5s %5s %5s %5s %5s %5s\n",
-           "N", "naive", "coalesced", "smem", "1D", "2D", "vec", "cuBLAS",
-           "naive%", "coal%", "smem%", "1D%", "2D%", "vec%",
-           "ok_n", "ok_c", "ok_s", "ok_1", "ok_2", "ok_v");
+    printf("%6s %9s %9s %9s %9s %9s %9s %9s %9s %7s %7s %7s %7s %7s %7s %7s %5s %5s %5s %5s %5s %5s %5s\n",
+           "N", "naive", "coalesced", "smem", "1D", "2D", "vec", "warp", "cuBLAS",
+           "naive%", "coal%", "smem%", "1D%", "2D%", "vec%", "warp%",
+           "ok_n", "ok_c", "ok_s", "ok_1", "ok_2", "ok_v", "ok_w");
 
     /*i didnt know before but its good to have the sweep cuz how it shows how the kernel compares to cuBLAS across sizes,
      since small sizes mostly measure launch overhead and large ones measure real compute, so one size alone mislead .
@@ -43,6 +44,7 @@ int main()
         float *h_1D = (float *)malloc(bytes);
         float *h_2D = (float *)malloc(bytes);
         float *h_vec = (float *)malloc(bytes);
+        float *h_warp = (float *)malloc(bytes);
 
         for (size_t i = 0; i < count; i++)
         {
@@ -50,7 +52,7 @@ int main()
             h_B[i] = rand() / float(RAND_MAX);
         }
 
-        float *d_A, *d_B, *d_Coal, *d_ref, *d_naive, *d_smem, *d_1D, *d_2D, *d_vec;
+        float *d_A, *d_B, *d_Coal, *d_ref, *d_naive, *d_smem, *d_1D, *d_2D, *d_vec, *d_warp;
         CUDA_CHECK(cudaMalloc(&d_A, bytes));
         CUDA_CHECK(cudaMalloc(&d_B, bytes));
         CUDA_CHECK(cudaMalloc(&d_ref, bytes));
@@ -60,6 +62,7 @@ int main()
         CUDA_CHECK(cudaMalloc(&d_1D, bytes));
         CUDA_CHECK(cudaMalloc(&d_2D, bytes));
         CUDA_CHECK(cudaMalloc(&d_vec, bytes));
+        CUDA_CHECK(cudaMalloc(&d_warp, bytes));
 
         CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
@@ -70,6 +73,7 @@ int main()
         CUDA_CHECK(cudaMemset(d_1D, 0, bytes));
         CUDA_CHECK(cudaMemset(d_2D, 0, bytes));
         CUDA_CHECK(cudaMemset(d_vec, 0, bytes));
+        CUDA_CHECK(cudaMemset(d_warp, 0, bytes));
 
         dim3 block(32, 32);
         dim3 grid((N + 31) / 32, (N + 31) / 32);
@@ -81,6 +85,11 @@ int main()
         constexpr int BM2 = 128, BN2 = 128, BK2 = 8, TM2 = 8, TN2 = 8;
         dim3 block2D((BM2 * BN2) / (TM2 * TN2));
         dim3 grid2D((N + BN2 - 1) / BN2, (N + BM2 - 1) / BM2);
+
+        constexpr int BM3 = 128, BN3 = 128, BK3 = 16, WM3 = 64, WN3 = 64, WNITER3 = 4, TM3 = 8, TN3 = 4;
+        constexpr int NT3 = (BM3 / WM3) * (BN3 / WN3) * 32;
+        dim3 blockW(NT3);
+        dim3 gridW((N + BN3 - 1) / BN3, (N + BM3 - 1) / BM3);
 
         auto coal = [&]()
         {
@@ -118,6 +127,11 @@ int main()
             matmul_vec<BM2, BN2, BK2, TM2, TN2><<<grid2D, block2D>>>(N, N, N, alpha, d_A, d_B, beta, d_vec);
         };
 
+        auto warpTile = [&]()
+        {
+            matmul_warp<BM3, BN3, BK3, WM3, WN3, WNITER3, TM3, TN3, NT3><<<gridW, blockW>>>(N, N, N, alpha, d_A, d_B, beta, d_warp);
+        };
+
         int runs = (N >= 2048) ? 3 : 10;
 
         float msNaive = timeMS(naive, runs);
@@ -126,7 +140,7 @@ int main()
         float ms1D = timeMS(oneD, runs);
         float ms2D = timeMS(twoD, runs);
         float msVec = timeMS(vec, runs);
-
+        float msWarp = timeMS(warpTile, runs);
         float msRef = timeMS(ref, runs);
         CUDA_CHECK(cudaGetLastError());
 
@@ -137,6 +151,7 @@ int main()
         CUDA_CHECK(cudaMemcpy(h_1D, d_1D, bytes, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_2D, d_2D, bytes, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_vec, d_vec, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_warp, d_warp, bytes, cudaMemcpyDeviceToHost));
 
         bool okNaive = matches(h_naive, h_ref, count);
         bool okCoalesced = matches(h_Coal, h_ref, count);
@@ -144,6 +159,7 @@ int main()
         bool ok1D = matches(h_1D, h_ref, count);
         bool ok2D = matches(h_2D, h_ref, count);
         bool okVec = matches(h_vec, h_ref, count);
+        bool okWarp = matches(h_warp, h_ref, count);
 
         double flops = 2.0 * N * N * N;
         double gRef = flops / (msRef * 1e6);
@@ -153,13 +169,14 @@ int main()
         double g1D = flops / (ms1D * 1e6);
         double g2D = flops / (ms2D * 1e6);
         double gVec = flops / (msVec * 1e6);
+        double gWarp = flops / (msWarp * 1e6);
 
-        printf("%6d %9.1f %9.1f %9.1f %9.1f %9.1f %9.1f %9.1f %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%% %5s %5s %5s %5s %5s %5s\n",
-               N, gNaive, gCoalesced, gSmem, g1D, g2D, gVec, gRef,
+        printf("%6d %9.1f %9.1f %9.1f %9.1f %9.1f %9.1f %9.1f %9.1f %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%% %5s %5s %5s %5s %5s %5s %5s\n",
+               N, gNaive, gCoalesced, gSmem, g1D, g2D, gVec, gWarp, gRef,
                100.0 * gNaive / gRef, 100.0 * gCoalesced / gRef, 100.0 * gSmem / gRef,
-               100.0 * g1D / gRef, 100.0 * g2D / gRef, 100.0 * gVec / gRef,
+               100.0 * g1D / gRef, 100.0 * g2D / gRef, 100.0 * gVec / gRef, 100.0 * gWarp / gRef,
                okNaive ? "YES" : "NO", okCoalesced ? "YES" : "NO", okSmem ? "YES" : "NO",
-               ok1D ? "YES" : "NO", ok2D ? "YES" : "NO", okVec ? "YES" : "NO");
+               ok1D ? "YES" : "NO", ok2D ? "YES" : "NO", okVec ? "YES" : "NO", okWarp ? "YES" : "NO");
 
         cudaFree(d_A);
         cudaFree(d_B);
@@ -179,6 +196,8 @@ int main()
         free(h_2D);
         cudaFree(d_vec);
         free(h_vec);
+        cudaFree(d_warp);
+        free(h_warp);
     }
 
     cublasDestroy(handle);
