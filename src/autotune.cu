@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <cublas_v2.h>
 #include "common.cuh"
-#include "kernels/09_autotuned.cuh"
+#include "kernels/07_autotuned.cuh"
 
 template <int BM, int BN, int BK, int TM, int TN>
 void tryConfig(int N, const float *d_A, const float *d_B, float *d_C,
