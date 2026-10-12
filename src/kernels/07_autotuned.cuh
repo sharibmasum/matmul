@@ -8,14 +8,12 @@
 #include <cuda_runtime.h>
 
 template <int BM, int BN, int TM, int TN>
-constexpr int numThreads() { return (BM / TM) * (BN / TN); }
+__host__ __device__ constexpr int numThreads() { return (BM / TM) * (BN / TN); }
 
 template <int BM, int BN, int BK, int TM, int TN>
-constexpr bool validConfig()
+__host__ __device__ constexpr bool validConfig()
 {
-    return (BM % TM == 0) && (BN % TN == 0) && (BK % 4 == 0) && (BN % 4 == 0) && (TN % 4 == 0)         // float4 widths
-           && (numThreads<BM, BN, TM, TN>() <= 1024) && (numThreads<BM, BN, TM, TN>() % (BK / 4) == 0) // whole rows per pass
-           && (numThreads<BM, BN, TM, TN>() % (BN / 4) == 0) && ((BM * BK) % (4 * numThreads<BM, BN, TM, TN>()) == 0) && ((BK * BN) % (4 * numThreads<BM, BN, TM, TN>()) == 0) && ((BM * BK + BK * BN) * 4 <= 48 * 1024);
+    return (BM % TM == 0) && (BN % TN == 0) && (BK % 4 == 0) && (BN % 4 == 0) && (TN % 4 == 0) && (numThreads<BM, BN, TM, TN>() <= 1024) && (numThreads<BM, BN, TM, TN>() % (BK / 4) == 0) && (numThreads<BM, BN, TM, TN>() % (BN / 4) == 0) && ((BM * BK) % (4 * numThreads<BM, BN, TM, TN>()) == 0) && ((BK * BN) % (4 * numThreads<BM, BN, TM, TN>()) == 0) && ((BM * BK + BK * BN) * 4 <= 48 * 1024);
 }
 
 template <const int BM, const int BN, const int BK, const int TM, const int TN>
