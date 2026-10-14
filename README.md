@@ -68,7 +68,7 @@ All values are in GFLOPS. *Coal.* = coalesced, *Vec.* = vectorized, *Warp* = war
 
 ### A note on beating cuBLAS
 
-Beating cuBLAS here does **not** mean this kernel is faster in general. cuBLAS has to stay correct and fast across every shape, dtype, and GPU, while this kernel is hand-tuned narrowly for exactly these five square FP32 sizes on this one T4.
+cuBLAS selects its SGEMM kernel from a library using size-based heuristics rather than always running the theoretically fastest option, and on this Tesla T4 at N=4096/8192 its chosen kernel’s measured throughput actually dropped relative to N=1024/2048 — evidence it picked a suboptimal kernel for those specific shapes. The autotuned warptiling kernel, tuned for this exact shape, stayed consistent and edged past cuBLAS’s pick at those sizes; this reflects cuBLAS’s kernel-selection heuristic underperforming for this GPU/shape, not a general win over NVIDIA’s engineering.
 
 ## The kernels
 
